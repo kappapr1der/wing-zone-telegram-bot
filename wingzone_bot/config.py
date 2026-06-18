@@ -30,8 +30,8 @@ class Settings(BaseSettings):
 
     channel_name: str = "где-то в зоне крыла"
     channel_voice: str = (
-        "Живой русскоязычный F1/NASCAR-канал: иронично, саркастично, смешно, "
-        "с ощущением лайв-реакции, "
+        "Живой русскоязычный F1/NASCAR-канал в духе хорошего гоночного комментария: "
+        "легко, информативно, с контекстом, профессиональными терминами и ироничной подачей, "
         "но без травли, выдуманных фактов и занудства."
     )
     voice_intensity: int = 3
@@ -44,6 +44,11 @@ class Settings(BaseSettings):
             "https://www.motorsport.com/rss/f1/news/",
         ]
     )
+    sources_config_path: Path = Path("sources.yml")
+    allowed_series: list[str] = Field(default_factory=lambda: ["f1", "nascar"])
+    blocked_series: list[str] = Field(default_factory=lambda: ["motogp", "moto2", "moto3", "indycar", "wec"])
+    min_source_score: int = 60
+    default_editorial_mode: str = "single_story"
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.2"
@@ -63,6 +68,11 @@ class Settings(BaseSettings):
     @classmethod
     def parse_news_feeds(cls, value: Any) -> list[str]:
         return _split_csv(value)
+
+    @field_validator("allowed_series", "blocked_series", mode="before")
+    @classmethod
+    def parse_series_lists(cls, value: Any) -> list[str]:
+        return [part.lower() for part in _split_csv(value)]
 
     @field_validator("voice_intensity")
     @classmethod
