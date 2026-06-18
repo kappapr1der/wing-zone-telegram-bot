@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     admin_user_ids: list[int] = Field(default_factory=list)
 
     auto_publish: bool = False
+    editor_buttons_enabled: bool = True
     check_interval_seconds: int = 300
     max_items_per_run: int = 5
     post_cooldown_minutes: int = 10
