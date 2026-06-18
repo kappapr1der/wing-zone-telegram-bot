@@ -103,6 +103,11 @@ class WingZoneApp:
             title=note[:120],
             url="",
             summary=note,
+            series="f1",
+            source_score=100,
+            source_kind="manual",
+            source_tags=["live", "manual"],
+            editorial_mode="live",
         )
         draft_text = await self.composer.compose(item)
         draft_id = self.storage.save_draft(item, draft_text)
