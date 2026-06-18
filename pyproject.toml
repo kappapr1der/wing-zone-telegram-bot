@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wing-zone-telegram-bot"
+version = "0.1.0"
+description = "Telegram editorial bot for live motorsport commentary channels."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.9,<4",
+  "feedparser>=6.0,<7",
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.3,<3",
+  "python-dotenv>=1.0,<2",
+]
+
+[project.scripts]
+wingzone-bot = "wingzone_bot.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wingzone_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
