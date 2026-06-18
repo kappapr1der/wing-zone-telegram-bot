@@ -2,50 +2,87 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from hashlib import sha256
+from pathlib import Path
 from typing import Any, Protocol
 
 import aiohttp
 
 from .config import Settings
-from .models import NewsItem
+from .models import Draft, NewsItem
 from .text import normalize_spaces
 
 LOGGER = logging.getLogger(__name__)
 
-RACING_GLOSSARY = """
-F1 vocabulary:
-- race pace -> гоночный темп
-- qualifying pace -> темп в квалификации
-- long run -> длинный отрезок
-- stint -> стинт / отрезок
-- dirty air -> грязный воздух
-- clean air -> чистый воздух
-- undercut -> андеркат / подрезка
-- overcut -> оверкат
-- power unit -> силовая установка
-- floor upgrade -> обновление днища
-- parc ferme -> закрытый парк
-- stewards -> стюарды
-- race control -> дирекция гонки
-- safety car -> сейфти-кар
-- silly season -> трансферная возня / сезон слухов
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-NASCAR vocabulary:
-- car -> машина
-- restart -> рестарт
-- stage racing -> гонка по стадиям
-- drafting -> слипстрим / драфтинг
-- playoff bubble -> граница плей-офф
-- crew chief -> крю-чиф
-- pit road -> пит-роуд
-- caution -> желтые флаги / caution
-""".strip()
+
+def load_prompt_file(name: str) -> str:
+    path = PROMPTS_DIR / name
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        LOGGER.warning("Prompt file is missing: %s", path)
+        return ""
+
+
+CHANNEL_VOICE_GUIDE = load_prompt_file("channel_voice.md")
+RACING_GLOSSARY = load_prompt_file("glossary.md")
 
 
 class Composer(Protocol):
     async def compose(self, item: NewsItem) -> str:
         """Return a Telegram-ready draft for a news item."""
+
+    async def revise(self, draft: Draft, action: DraftRevisionAction) -> str:
+        """Return an edited version of an existing draft."""
+
+
+@dataclass(frozen=True)
+class DraftRevisionAction:
+    key: str
+    label: str
+    instruction: str
+    requires_model: bool = True
+
+
+DRAFT_REVISION_ACTIONS: dict[str, DraftRevisionAction] = {
+    "rewrite": DraftRevisionAction(
+        key="rewrite",
+        label="Rewrite",
+        instruction=(
+            "Перепиши черновик вкуснее и естественнее для канала: живее, плотнее, без воды, "
+            "с теми же фактами и без новых непроверенных деталей."
+        ),
+    ),
+    "shorter": DraftRevisionAction(
+        key="shorter",
+        label="Shorter",
+        instruction="Сократи черновик примерно на треть, оставив главное, источник и нерв новости.",
+        requires_model=False,
+    ),
+    "context": DraftRevisionAction(
+        key="context",
+        label="Context",
+        instruction=(
+            "Добавь контекст: почему эта новость важна для F1/NASCAR, команд, гонщиков или гонки. "
+            "Не добавляй фактов, которых нет в черновике."
+        ),
+    ),
+    "irony": DraftRevisionAction(
+        key="irony",
+        label="Irony",
+        instruction=(
+            "Сделай тон чуть более ироничным и разговорным, но не токсичным. "
+            "Факты, осторожность к слухам и ссылка должны сохраниться."
+        ),
+    ),
+}
+
+
+def get_draft_revision_action(key: str) -> DraftRevisionAction | None:
+    return DRAFT_REVISION_ACTIONS.get(key)
 
 
 class TemplateComposer:
@@ -60,6 +97,11 @@ class TemplateComposer:
         if item.editorial_mode == "live":
             return self._live(item, title, summary)
         return self._single_story(item, title, summary)
+
+    async def revise(self, draft: Draft, action: DraftRevisionAction) -> str:
+        if action.key == "shorter":
+            return shorten_draft_text(draft.text, draft.url)
+        return draft.text
 
     def _single_story(self, item: NewsItem, title: str, summary: str) -> str:
         context = summary or "Подробностей пока немного, так что держимся фактов и не изображаем телеметрию из кофейной гущи."
@@ -102,6 +144,46 @@ class TemplateComposer:
         return pool[index]
 
 
+def shorten_draft_text(text: str, source_url: str = "", max_chars: int = 900) -> str:
+    clean = text.strip()
+    if len(clean) <= max_chars:
+        return clean
+
+    body, source = split_source_link(clean, source_url)
+    paragraphs = [paragraph.strip() for paragraph in body.split("\n\n") if paragraph.strip()]
+    target = max(320, int(max_chars * 0.82))
+    selected: list[str] = []
+
+    for paragraph in paragraphs:
+        candidate = paragraph if not selected else "\n\n".join([*selected, paragraph])
+        if len(candidate) > target:
+            break
+        selected.append(paragraph)
+
+    shortened = "\n\n".join(selected).strip()
+    if not shortened or len(shortened) > target:
+        shortened = trim_at_word_boundary(body, target)
+
+    if source and source not in shortened:
+        shortened = f"{shortened}\n\n{source}"
+    return shortened.strip()
+
+
+def split_source_link(text: str, source_url: str) -> tuple[str, str]:
+    source = source_url.strip()
+    body = text.strip()
+    if source and source in body:
+        body = body.replace(source, "").strip()
+    return body, source
+
+
+def trim_at_word_boundary(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text.strip()
+    trimmed = text[:limit].rsplit(" ", maxsplit=1)[0].strip()
+    return f"{trimmed}..." if trimmed else f"{text[:limit].strip()}..."
+
+
 class OpenAIComposer:
     def __init__(self, settings: Settings, fallback: Composer | None = None) -> None:
         self.settings = settings
@@ -111,37 +193,54 @@ class OpenAIComposer:
         if not self.settings.openai_api_key:
             return await self.fallback.compose(item)
 
+        try:
+            text = await self._request_response_text(self._build_user_prompt(item), max_output_tokens=720)
+            return self._with_source(text, item.url)
+        except Exception:
+            LOGGER.exception("OpenAI composition failed; falling back to template")
+            return await self.fallback.compose(item)
+
+    async def revise(self, draft: Draft, action: DraftRevisionAction) -> str:
+        if not self.settings.openai_api_key:
+            return await self.fallback.revise(draft, action)
+
+        try:
+            text = await self._request_response_text(
+                self._build_revision_prompt(draft, action),
+                max_output_tokens=650,
+            )
+            return self._with_source(text, draft.url)
+        except Exception:
+            LOGGER.exception("OpenAI revision failed; falling back to template")
+            return await self.fallback.revise(draft, action)
+
+    async def _request_response_text(self, user_prompt: str, max_output_tokens: int) -> str:
         payload: dict[str, Any] = {
             "model": self.settings.openai_model,
             "input": [
                 {"role": "developer", "content": self._developer_prompt()},
-                {"role": "user", "content": self._build_user_prompt(item)},
+                {"role": "user", "content": user_prompt},
             ],
-            "max_output_tokens": 720,
+            "max_output_tokens": max_output_tokens,
         }
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=self.settings.openai_timeout_seconds)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    f"{self.settings.openai_base_url.rstrip('/')}/responses",
-                    headers={
-                        "Authorization": f"Bearer {self.settings.openai_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                ) as response:
-                    body = await response.text()
-                    if response.status >= 400:
-                        raise RuntimeError(f"OpenAI API error {response.status}: {body[:500]}")
-                    data = json.loads(body)
-                    text = extract_response_text(data)
-                    if not text:
-                        raise RuntimeError("OpenAI API returned no output text")
-                    return self._with_source(text, item.url)
-        except Exception:
-            LOGGER.exception("OpenAI composition failed; falling back to template")
-            return await self.fallback.compose(item)
+        timeout = aiohttp.ClientTimeout(total=self.settings.openai_timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{self.settings.openai_base_url.rstrip('/')}/responses",
+                headers={
+                    "Authorization": f"Bearer {self.settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            ) as response:
+                body = await response.text()
+                if response.status >= 400:
+                    raise RuntimeError(f"OpenAI API error {response.status}: {body[:500]}")
+                data = json.loads(body)
+                text = extract_response_text(data)
+                if not text:
+                    raise RuntimeError("OpenAI API returned no output text")
+                return text
 
     def _developer_prompt(self) -> str:
         profanity = (
@@ -153,12 +252,8 @@ class OpenAIComposer:
             f"Ты редактор Telegram-канала '{self.settings.channel_name}'. "
             f"Голос канала: {self.settings.channel_voice}. "
             f"Интенсивность: {self.settings.voice_intensity}/5; {profanity}. "
-            "Пиши в традиции хорошего русскоязычного гоночного комментария: легко, живо, информативно, "
-            "с иронией, но без токсичности. Не копируй конкретного комментатора и не имитируй человека один-в-один. "
-            "Переводи не дословно, а редакторски: нормальным русским гоночным языком, с контекстом и профессиональными терминами. "
-            "Не калькируй английские заголовки. Не выдумывай факты, цитаты, штрафы, позиции, тайминги или инсайды. "
-            "Если это слух, подавай как слух: 'пишут', 'по данным', 'если подтвердится', 'пока это уровень паддок-дыма'. "
-            "Не трави пилотов, команды, журналистов и болельщиков по защищенным признакам. Не пиши дисклеймеры. "
+            "Не копируй конкретного комментатора и не имитируй человека один-в-один. Не пиши дисклеймеры.\n\n"
+            f"Гайд по голосу:\n{CHANNEL_VOICE_GUIDE}\n\n"
             f"Глоссарий:\n{RACING_GLOSSARY}"
         )
 
@@ -176,6 +271,22 @@ class OpenAIComposer:
             f"Кратко: {item.summary or 'нет описания'}\n"
             f"Ссылка: {item.url}\n\n"
             f"{mode_instruction}"
+        )
+
+    def _build_revision_prompt(self, draft: Draft, action: DraftRevisionAction) -> str:
+        return (
+            "Перепиши уже готовый Telegram-черновик.\n\n"
+            f"Кнопка редактора: {action.label}\n"
+            f"Задача: {action.instruction}\n"
+            f"Заголовок/тема: {draft.title}\n"
+            f"Ссылка источника: {draft.url or 'нет'}\n\n"
+            "Правила:\n"
+            "- сохрани все факты и уровень уверенности исходного черновика;\n"
+            "- не добавляй цитаты, цифры, штрафы, тайминги, инсайды или новые утверждения;\n"
+            "- если это слух, оставь подачу как слух, а не как подтвержденный факт;\n"
+            "- верни только готовый текст поста без пояснений редактора;\n"
+            "- не удаляй ссылку на источник, если она была в черновике.\n\n"
+            f"Черновик:\n<<<\n{draft.text}\n>>>"
         )
 
     @staticmethod

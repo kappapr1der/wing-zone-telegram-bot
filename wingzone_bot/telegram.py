@@ -77,6 +77,24 @@ class TelegramClient:
             {"callback_query_id": callback_query_id, "text": text},
         )
 
+    async def edit_message_text(
+        self,
+        chat_id: str | int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+        disable_web_page_preview: bool = False,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": disable_web_page_preview,
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        await self.request("editMessageText", payload)
+
     async def edit_message_reply_markup(
         self,
         chat_id: str | int,

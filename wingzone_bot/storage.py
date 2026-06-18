@@ -96,6 +96,13 @@ class Storage:
                 (status, now_iso(), draft_id),
             )
 
+    def update_draft_text(self, draft_id: int, text: str, status: str = "revised") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE drafts SET text = ?, status = ?, updated_at = ? WHERE id = ?",
+                (text, status, now_iso(), draft_id),
+            )
+
     def recent_drafts(self, limit: int = 10) -> list[Draft]:
         with self.connect() as connection:
             rows = connection.execute(

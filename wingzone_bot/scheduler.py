@@ -5,15 +5,38 @@ import logging
 import time
 from typing import Any
 
-from .composer import create_composer
+from .composer import create_composer, get_draft_revision_action
 from .config import Settings
-from .models import NewsItem
+from .models import Draft, NewsItem
 from .sources import fetch_news_items
 from .storage import Storage
 from .telegram import TelegramClient
 from .text import format_draft_list, format_review_message
 
 LOGGER = logging.getLogger(__name__)
+
+
+def review_keyboard(draft_id: int, editor_buttons_enabled: bool = True) -> dict[str, Any]:
+    rows = [
+        [
+            {"text": "Publish", "callback_data": f"publish:{draft_id}"},
+            {"text": "Drop", "callback_data": f"drop:{draft_id}"},
+        ]
+    ]
+    if editor_buttons_enabled:
+        rows.extend(
+            [
+                [
+                    {"text": "Rewrite", "callback_data": f"edit:{draft_id}:rewrite"},
+                    {"text": "Shorter", "callback_data": f"edit:{draft_id}:shorter"},
+                ],
+                [
+                    {"text": "Context", "callback_data": f"edit:{draft_id}:context"},
+                    {"text": "Irony", "callback_data": f"edit:{draft_id}:irony"},
+                ],
+            ]
+        )
+    return {"inline_keyboard": rows}
 
 
 class WingZoneApp:
@@ -85,14 +108,7 @@ class WingZoneApp:
         await self.telegram.send_message(
             self.settings.telegram_review_chat_id,
             format_review_message(draft),
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {"text": "Publish", "callback_data": f"publish:{draft.id}"},
-                        {"text": "Drop", "callback_data": f"drop:{draft.id}"},
-                    ]
-                ]
-            },
+            reply_markup=review_keyboard(draft.id, self.settings.editor_buttons_enabled),
         )
         self.storage.set_draft_status(draft_id, "sent_review")
 
@@ -128,6 +144,30 @@ class WingZoneApp:
     async def drop_draft(self, draft_id: int) -> None:
         self.storage.set_draft_status(draft_id, "dropped")
         LOGGER.info("dropped draft #%s", draft_id)
+
+    async def revise_draft(self, draft_id: int, action_key: str) -> tuple[Draft, bool]:
+        action = get_draft_revision_action(action_key)
+        if action is None:
+            raise ValueError(f"Unknown editor action: {action_key}")
+        if action.requires_model and not self.settings.openai_api_key:
+            raise RuntimeError(f"{action.label} requires OPENAI_API_KEY")
+
+        draft = self.storage.get_draft(draft_id)
+        if draft is None:
+            raise RuntimeError(f"Draft #{draft_id} not found")
+
+        revised_text = (await self.composer.revise(draft, action)).strip()
+        if not revised_text:
+            raise RuntimeError("Editor returned empty draft")
+        if revised_text == draft.text.strip():
+            return draft, False
+
+        self.storage.update_draft_text(draft_id, revised_text)
+        updated = self.storage.get_draft(draft_id)
+        if updated is None:
+            raise RuntimeError(f"Draft #{draft_id} not found after update")
+        LOGGER.info("revised draft #%s with %s", draft_id, action.key)
+        return updated, True
 
     async def send_test(self, text: str) -> None:
         chat_id = self.settings.telegram_review_chat_id or self.settings.telegram_channel_id
@@ -188,30 +228,56 @@ class WingZoneApp:
             return
 
         data = callback.get("data", "")
-        action, _, raw_id = data.partition(":")
-        if not raw_id.isdigit():
+        parts = data.split(":")
+        if len(parts) < 2 or not parts[1].isdigit():
             return
-        draft_id = int(raw_id)
+        action = parts[0]
+        draft_id = int(parts[1])
 
-        if action == "publish":
-            await self.publish_draft(draft_id)
-            answer = f"Published #{draft_id}"
-        elif action == "drop":
-            await self.drop_draft(draft_id)
-            answer = f"Dropped #{draft_id}"
-        else:
+        try:
+            if action == "publish":
+                await self.publish_draft(draft_id)
+                answer = f"Published #{draft_id}"
+                clear_keyboard = True
+            elif action == "drop":
+                await self.drop_draft(draft_id)
+                answer = f"Dropped #{draft_id}"
+                clear_keyboard = True
+            elif action == "edit" and len(parts) >= 3:
+                draft, changed = await self.revise_draft(draft_id, parts[2])
+                answer = f"Edited #{draft_id}" if changed else f"No changes for #{draft_id}"
+                clear_keyboard = False
+                if changed:
+                    await self._update_review_message(callback, draft)
+            else:
+                return
+
+            if callback_id:
+                await self.telegram.answer_callback_query(callback_id, answer)
+        except Exception as exc:
+            LOGGER.exception("callback failed: %s", data)
+            if callback_id:
+                await self.telegram.answer_callback_query(callback_id, f"Failed: {exc}"[:180])
             return
-
-        if callback_id:
-            await self.telegram.answer_callback_query(callback_id, answer)
 
         message = callback.get("message")
-        if message:
+        if message and clear_keyboard:
             await self.telegram.edit_message_reply_markup(
                 chat_id=message["chat"]["id"],
                 message_id=message["message_id"],
                 reply_markup={"inline_keyboard": []},
             )
+
+    async def _update_review_message(self, callback: dict[str, Any], draft: Draft) -> None:
+        message = callback.get("message")
+        if not message:
+            return
+        await self.telegram.edit_message_text(
+            chat_id=message["chat"]["id"],
+            message_id=message["message_id"],
+            text=format_review_message(draft),
+            reply_markup=review_keyboard(draft.id, self.settings.editor_buttons_enabled),
+        )
 
     def _is_admin_message(self, message: dict[str, Any]) -> bool:
         user_id = message.get("from", {}).get("id")
