@@ -1,0 +1,6 @@
+aiohttp>=3.9,<4
+feedparser>=6.0,<7
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+python-dotenv>=1.0,<2
+pytest>=8.0,<9
