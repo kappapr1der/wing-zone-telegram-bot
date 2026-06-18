@@ -1,0 +1,115 @@
+allowed_series:
+  - f1
+  - nascar
+blocked_series:
+  - motogp
+  - moto2
+  - moto3
+  - indycar
+  - wec
+min_score: 60
+
+sources:
+  - name: RACER F1
+    url: https://racer.com/category/f1/feed/
+    series: f1
+    score: 85
+    kind: news
+    tags: [f1, paddock, race-weekend]
+    default_mode: single_story
+
+  - name: RACER NASCAR
+    url: https://racer.com/category/nascar/feed/
+    series: nascar
+    score: 85
+    kind: news
+    tags: [nascar, race-weekend]
+    default_mode: nascar
+
+  - name: Motorsport F1
+    url: https://www.motorsport.com/rss/f1/news/
+    series: f1
+    score: 80
+    kind: news
+    tags: [f1, paddock, technical]
+    default_mode: single_story
+    block_keywords:
+      - /motogp/
+      - motogp
+      - moto2
+      - moto3
+      - quartararo
+      - bagnaia
+      - marquez
+
+  - name: Autosport F1
+    url: https://www.autosport.com/rss/f1/news/
+    series: f1
+    score: 80
+    kind: news
+    tags: [f1, paddock, analysis]
+    default_mode: single_story
+    block_keywords:
+      - /motogp/
+      - motogp
+      - moto2
+      - moto3
+
+  - name: The Race F1
+    url: https://www.the-race.com/rss/
+    series: f1
+    score: 75
+    kind: analysis
+    tags: [f1, analysis, context]
+    default_mode: single_story
+    allow_keywords:
+      - /formula-1/
+      - formula 1
+      - f1
+      - ferrari
+      - mercedes
+      - red bull
+      - mclaren
+      - aston martin
+      - williams
+      - alpine
+      - sauber
+      - haas
+      - verstappen
+      - hamilton
+      - leclerc
+      - norris
+      - piastri
+      - alonso
+      - russell
+      - sainz
+    block_keywords:
+      - motogp
+      - indycar
+      - formula-e
+      - formula e
+      - wec
+      - imsa
+      - /moto
+      - /indycar/
+
+  - name: PlanetF1
+    url: https://www.planetf1.com/rss
+    series: f1
+    score: 65
+    kind: rumor
+    tags: [f1, rumors, paddock]
+    default_mode: single_story
+    block_keywords:
+      - motogp
+
+  # Jayski is valuable for NASCAR silly season, but currently returns 403 to
+  # simple RSS clients in this environment. Keep it as a manual candidate
+  # rather than a noisy default source.
+  # - name: Jayski NASCAR
+  #   url: https://www.jayski.com/feed/
+  #   series: nascar
+  #   score: 70
+  #   kind: rumor
+  #   tags: [nascar, rumors, silly-season]
+  #   default_mode: nascar
